@@ -23,10 +23,6 @@
 	<li>
 		<div id="user-status-menu-item">
 			<span id="user-status-menu-item__header">{{ displayName }}</span>
-			<!--<button-->
-			<!--class="user-status-menu-item__subheader icon"-->
-			<!--:class="[statusIcon]">-->
-			<!--{{ visibleMessage }}-->
 			<Actions
 				id="user-status-menu-item__subheader"
 				:default-icon="statusIcon"
@@ -46,7 +42,6 @@
 					{{ $t('user_status', 'Set custom status') }}
 				</ActionButton>
 			</Actions>
-			<!--</button>-->
 			<SetStatusModal
 				v-if="isModalOpen"
 				@close="closeModal" />
@@ -62,6 +57,8 @@ import ActionButton from '@nextcloud/vue/dist/Components/ActionButton'
 import { mapState } from 'vuex'
 import { showError } from '@nextcloud/dialogs'
 import { getAllStatusOptions } from './services/statusOptionsService'
+import { sendHeartbeat } from './services/heartbeatService'
+import debounce from 'debounce'
 
 export default {
 	name: 'App',
@@ -75,6 +72,10 @@ export default {
 			isModalOpen: false,
 			isSavingStatus: false,
 			statuses: getAllStatusOptions(),
+			heartbeatInterval: null,
+			setIdleTimeout: null,
+			mouseMoveListener: null,
+			isAway: false,
 		}
 	},
 	computed: {
@@ -133,6 +134,36 @@ export default {
 	 */
 	mounted() {
 		this.$store.dispatch('loadStatusFromInitialState')
+
+		if (OC.config.session_keepalive) {
+			// Send the latest status to the server every 5 minutes
+			this.heartbeatInterval = setInterval(this._backgroundHeartbeat.bind(this), 1000 * 60 * 5)
+			this.setIdleTimeout = () => {
+				this.isAway = true
+			}
+			// Catch mouse movements, but debounce to once every 30 seconds
+			this.mouseMoveListener = debounce(() => {
+				this.isAway = false
+				// Reset the two minute counter
+				clearTimeout(this.setIdleTimeout)
+				// If the user did not move the mouse within two minutes,
+				// mark them as idle
+				setTimeout(this.setIdleTimeout, 1000 * 60 * 2)
+			}, 1000 * 30)
+			window.addEventListener('mousemove', this.mouseMoveListener, {
+				capture: true,
+				passive: true,
+			})
+
+			this._backgroundHeartbeat()
+		}
+	},
+	/**
+	 * Some housekeeping before destroying the component
+	 */
+	beforeDestroy() {
+		window.removeEventListener('mouseMove', this.mouseMoveListener)
+		clearInterval(this.heartbeatInterval)
 	},
 	methods: {
 		/**
@@ -163,6 +194,16 @@ export default {
 			} finally {
 				this.isSavingStatus = false
 			}
+		},
+		/**
+		 * Sends the status heartbeat to the server
+		 *
+		 * @returns {Promise<void>}
+		 * @private
+		 */
+		async _backgroundHeartbeat() {
+			await sendHeartbeat(this.isAway)
+			await this.$store.dispatch('reFetchStatusFromServer')
 		},
 	},
 }
